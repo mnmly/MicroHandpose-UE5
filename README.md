@@ -1,4 +1,4 @@
-# MicroHandpose
+# MicroHandpose-UE5
 
 Real-time hand pose estimation plugin for Unreal Engine 5.7. Detects hands and outputs 21 3D landmarks per hand, entirely on the GPU using compute shaders. No external dependencies (TensorFlow, ONNX, etc.) required.
 
@@ -7,7 +7,7 @@ Ported from [micro-handpose](https://github.com/svenflow/micro-handpose), a WebG
 ## Requirements
 
 - Unreal Engine 5.7+
-- Metal SM6 (macOS) or SM5+ (Windows)
+- Metal SM6 (macOS). Not tested for Windows
 - A webcam or video input source
 
 ## Installation
