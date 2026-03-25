@@ -1,0 +1,51 @@
+// MicroHandpose — Letterbox resize from texture to CHW float buffer
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int SrcWidth;
+int SrcHeight;
+int DstSize;       // Output is DstSize x DstSize
+float ScaleX;      // src_width / letterbox_width
+float ScaleY;      // src_height / letterbox_height
+float OffsetX;     // horizontal offset for letterbox
+float OffsetY;     // vertical offset for letterbox
+
+Texture2D<float4> InputTexture;
+SamplerState InputSampler;
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(16, 16, 1)]
+void LetterboxResize(uint3 DTid : SV_DispatchThreadID)
+{
+	int dx = DTid.x;
+	int dy = DTid.y;
+
+	if (dx >= DstSize || dy >= DstSize)
+		return;
+
+	// Map destination pixel to source coordinates (with letterbox offset)
+	float src_x = ((float)dx - OffsetX + 0.5f) * ScaleX - 0.5f;
+	float src_y = ((float)dy - OffsetY + 0.5f) * ScaleY - 0.5f;
+
+	// Check if pixel is in letterbox region
+	bool inRegion = (dx >= (int)OffsetX) && (dx < DstSize - (int)OffsetX) &&
+	                (dy >= (int)OffsetY) && (dy < DstSize - (int)OffsetY);
+
+	float r = 0.0f, g = 0.0f, b = 0.0f;
+
+	if (inRegion)
+	{
+		// Sample using normalized UV coordinates
+		float u = (src_x + 0.5f) / (float)SrcWidth;
+		float v = (src_y + 0.5f) / (float)SrcHeight;
+		float4 color = InputTexture.SampleLevel(InputSampler, float2(u, v), 0);
+		r = color.r;
+		g = color.g;
+		b = color.b;
+	}
+
+	// Write CHW layout: [3, DstSize, DstSize]
+	int pixelIdx = dy * DstSize + dx;
+	OutputBuffer[0 * DstSize * DstSize + pixelIdx] = r;
+	OutputBuffer[1 * DstSize * DstSize + pixelIdx] = g;
+	OutputBuffer[2 * DstSize * DstSize + pixelIdx] = b;
+}

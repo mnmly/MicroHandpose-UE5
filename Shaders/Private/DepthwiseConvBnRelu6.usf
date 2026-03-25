@@ -1,0 +1,55 @@
+// MicroHandpose — Depthwise Conv (variable kernel) + BN + ReLU6 (EfficientNet)
+// Weight layout: [channels, KernelSize*KernelSize] (transposed from TFLite [1,kH,kW,ch])
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InWidth;
+int InHeight;
+int Channels;
+int OutWidth;
+int OutHeight;
+int Stride;
+int KernelSize;
+int Pad;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> Weights;   // [Channels, KernelSize*KernelSize]
+StructuredBuffer<float> Bias;      // [Channels]
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void DepthwiseConvBnRelu6(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int ch = DTid.z;
+
+	if (ox >= OutWidth || oy >= OutHeight || ch >= Channels)
+		return;
+
+	float sum = 0.0f;
+	int ks2 = KernelSize * KernelSize;
+	int weightBase = ch * ks2;
+
+	for (int ky = 0; ky < KernelSize; ky++)
+	{
+		int iy = oy * Stride + ky - Pad;
+		if (iy < 0 || iy >= InHeight) continue;
+
+		for (int kx = 0; kx < KernelSize; kx++)
+		{
+			int ix = ox * Stride + kx - Pad;
+			if (ix < 0 || ix >= InWidth) continue;
+
+			float inputVal = InputBuffer[CHW_IDX(ch, iy, ix, InHeight, InWidth)];
+			float weightVal = Weights[weightBase + ky * KernelSize + kx];
+			sum += inputVal * weightVal;
+		}
+	}
+
+	sum += Bias[ch];
+
+	// ReLU6: min(max(0, x), 6)
+	sum = min(max(0.0f, sum), 6.0f);
+
+	OutputBuffer[CHW_IDX(ch, oy, ox, OutHeight, OutWidth)] = sum;
+}

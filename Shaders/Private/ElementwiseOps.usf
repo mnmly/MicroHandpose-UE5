@@ -1,0 +1,19 @@
+// MicroHandpose — Elementwise operations
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int Count;
+
+StructuredBuffer<float> BufferA;
+StructuredBuffer<float> BufferB;
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(256, 1, 1)]
+void ElementwiseAdd(uint3 DTid : SV_DispatchThreadID)
+{
+	int idx = DTid.x;
+
+	if (idx >= Count)
+		return;
+
+	OutputBuffer[idx] = BufferA[idx] + BufferB[idx];
+}

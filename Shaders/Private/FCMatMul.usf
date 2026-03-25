@@ -1,0 +1,37 @@
+// MicroHandpose — Fully Connected MatMul + optional Sigmoid
+// Weight layout: [OutFeatures, InFeatures]
+// Permutation: HAS_SIGMOID
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InFeatures;
+int OutFeatures;
+
+StructuredBuffer<float> InputBuffer;   // [InFeatures]
+StructuredBuffer<float> Weights;       // [OutFeatures, InFeatures]
+StructuredBuffer<float> Bias;          // [OutFeatures]
+RWStructuredBuffer<float> OutputBuffer; // [OutFeatures]
+
+[numthreads(256, 1, 1)]
+void FCMatMul(uint3 DTid : SV_DispatchThreadID)
+{
+	int outIdx = DTid.x;
+
+	if (outIdx >= OutFeatures)
+		return;
+
+	float sum = 0.0f;
+	int weightBase = outIdx * InFeatures;
+
+	for (int i = 0; i < InFeatures; i++)
+	{
+		sum += InputBuffer[i] * Weights[weightBase + i];
+	}
+
+	sum += Bias[outIdx];
+
+#if HAS_SIGMOID
+	sum = ActivateSigmoid(sum);
+#endif
+
+	OutputBuffer[outIdx] = sum;
+}

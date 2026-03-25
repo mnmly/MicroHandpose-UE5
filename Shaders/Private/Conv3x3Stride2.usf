@@ -1,0 +1,61 @@
+// MicroHandpose — 3x3 Stride-2 Convolution + ReLU (Landmark initial conv)
+// Weight layout: [outCh, kH=3, kW=3, inCh]
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InWidth;
+int InHeight;
+int InChannels;
+int OutWidth;
+int OutHeight;
+int OutChannels;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> Weights;
+StructuredBuffer<float> Bias;
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void Conv3x3Stride2(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int oc = DTid.z;
+
+	if (ox >= OutWidth || oy >= OutHeight || oc >= OutChannels)
+		return;
+
+	float sum = 0.0f;
+
+	// SAME padding for stride 2, kernel 3
+	// For 257→128: pad_total = 127*2+3-257 = 0, no padding needed (input is pre-padded to 257)
+	int padY = 0;
+	int padX = 0;
+
+	int weightBaseOc = oc * 3 * 3 * InChannels;
+
+	for (int ky = 0; ky < 3; ky++)
+	{
+		int iy = oy * 2 + ky - padY;
+		if (iy < 0 || iy >= InHeight) continue;
+
+		for (int kx = 0; kx < 3; kx++)
+		{
+			int ix = ox * 2 + kx - padX;
+			if (ix < 0 || ix >= InWidth) continue;
+
+			int weightBase = weightBaseOc + (ky * 3 + kx) * InChannels;
+
+			for (int ic = 0; ic < InChannels; ic++)
+			{
+				float inputVal = InputBuffer[CHW_IDX(ic, iy, ix, InHeight, InWidth)];
+				float weightVal = Weights[weightBase + ic];
+				sum += inputVal * weightVal;
+			}
+		}
+	}
+
+	sum += Bias[oc];
+	sum = ActivateReLU(sum);
+
+	OutputBuffer[CHW_IDX(oc, oy, ox, OutHeight, OutWidth)] = sum;
+}

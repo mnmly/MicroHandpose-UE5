@@ -1,0 +1,48 @@
+// MicroHandpose — Output Heads (FC layer → sigmoid or /256)
+// Fused: thread 0 = handflag (sigmoid), thread 1 = handedness (sigmoid), threads 2-64 = landmarks (/256)
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InChannels;      // 288 for landmark model
+int InSpatialSize;   // 2 (2x2 spatial)
+int NumOutputs;      // 65 (1 handflag + 1 handedness + 63 landmarks)
+
+StructuredBuffer<float> InputBuffer;   // [InChannels, 2, 2] CHW
+StructuredBuffer<float> Weights;       // [NumOutputs, InChannels * InSpatialSize * InSpatialSize]
+StructuredBuffer<float> Bias;          // [NumOutputs]
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(65, 1, 1)]
+void OutputHeads(uint3 DTid : SV_DispatchThreadID)
+{
+	int outIdx = DTid.x;
+
+	if (outIdx >= NumOutputs)
+		return;
+
+	int totalInputs = InChannels * InSpatialSize * InSpatialSize;
+	int weightBase = outIdx * totalInputs;
+
+	float sum = 0.0f;
+
+	// FC: dot product over all spatial positions and channels
+	for (int i = 0; i < totalInputs; i++)
+	{
+		sum += InputBuffer[i] * Weights[weightBase + i];
+	}
+
+	sum += Bias[outIdx];
+
+	// Apply activation based on output index
+	if (outIdx < 2)
+	{
+		// handflag (idx 0) and handedness (idx 1): sigmoid
+		sum = ActivateSigmoid(sum);
+	}
+	else
+	{
+		// landmarks (idx 2-64): divide by 256
+		sum = sum / 256.0f;
+	}
+
+	OutputBuffer[outIdx] = sum;
+}

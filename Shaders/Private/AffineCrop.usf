@@ -1,0 +1,40 @@
+// MicroHandpose — Affine Crop with rotation + bilinear interpolation
+// Crops a rotated ROI directly from the input texture (no intermediate CHW buffer needed)
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int DstSize;       // Output is DstSize x DstSize (224 for landmark model)
+
+// 4x4 affine matrix (only 2x3 used): maps normalized dst coords [0,1] → source UV [0,1]
+float4x4 AffineMatrix;
+
+Texture2D<float4> InputTexture;
+SamplerState InputSampler;
+RWStructuredBuffer<float> OutputBuffer; // [3, DstSize, DstSize] CHW
+
+[numthreads(16, 16, 1)]
+void AffineCrop(uint3 DTid : SV_DispatchThreadID)
+{
+	int dx = DTid.x;
+	int dy = DTid.y;
+
+	if (dx >= DstSize || dy >= DstSize)
+		return;
+
+	// Normalize destination coordinates to [0, 1]
+	float nx = ((float)dx + 0.5f) / (float)DstSize;
+	float ny = ((float)dy + 0.5f) / (float)DstSize;
+
+	// Apply affine transform to get source UV coordinates
+	float u = AffineMatrix[0][0] * nx + AffineMatrix[0][1] * ny + AffineMatrix[0][2];
+	float v = AffineMatrix[1][0] * nx + AffineMatrix[1][1] * ny + AffineMatrix[1][2];
+
+	// Bilinear sample from texture (hardware interpolation via sampler)
+	float4 color = InputTexture.SampleLevel(InputSampler, float2(u, v), 0);
+
+	// Write CHW layout: [3, DstSize, DstSize], RGB order
+	// Note: texture may be BGRA format, but SampleLevel always returns RGBA in HLSL
+	int pixelIdx = dy * DstSize + dx;
+	OutputBuffer[0 * DstSize * DstSize + pixelIdx] = color.r;
+	OutputBuffer[1 * DstSize * DstSize + pixelIdx] = color.g;
+	OutputBuffer[2 * DstSize * DstSize + pixelIdx] = color.b;
+}

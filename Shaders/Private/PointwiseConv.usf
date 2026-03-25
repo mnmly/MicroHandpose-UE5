@@ -1,0 +1,110 @@
+// MicroHandpose — Pointwise (1x1) Convolution + Skip + Activation
+// Weight layout: [outCh, inCh]
+// Permutations: ACTIVATION_MODE (0=None, 1=ReLU, 2=PReLU), HAS_SKIP
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InWidth;
+int InHeight;
+int InChannels;
+int OutWidth;
+int OutHeight;
+int OutChannels;
+int Stride;
+int ChannelPad;    // Number of skip channels to copy (rest are zero-padded)
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> SkipBuffer;
+StructuredBuffer<float> Weights;    // [OutChannels, InChannels]
+StructuredBuffer<float> Bias;       // [OutChannels]
+StructuredBuffer<float> Alpha;      // [OutChannels] for PReLU
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void PointwiseConv(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int oc = DTid.z;
+
+	if (ox >= OutWidth || oy >= OutHeight || oc >= OutChannels)
+		return;
+
+	// Pointwise (1x1) convolution with vec4 accumulation for precision
+	float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+
+	int weightBase = oc * InChannels;
+	int ic = 0;
+
+	// Process 4 channels at a time
+	for (; ic + 3 < InChannels; ic += 4)
+	{
+		int inIdx0 = CHW_IDX(ic,     oy, ox, InHeight, InWidth);
+		int inIdx1 = CHW_IDX(ic + 1, oy, ox, InHeight, InWidth);
+		int inIdx2 = CHW_IDX(ic + 2, oy, ox, InHeight, InWidth);
+		int inIdx3 = CHW_IDX(ic + 3, oy, ox, InHeight, InWidth);
+
+		sum0 += InputBuffer[inIdx0] * Weights[weightBase + ic];
+		sum1 += InputBuffer[inIdx1] * Weights[weightBase + ic + 1];
+		sum2 += InputBuffer[inIdx2] * Weights[weightBase + ic + 2];
+		sum3 += InputBuffer[inIdx3] * Weights[weightBase + ic + 3];
+	}
+
+	// Handle remaining channels
+	for (; ic < InChannels; ic++)
+	{
+		sum0 += InputBuffer[CHW_IDX(ic, oy, ox, InHeight, InWidth)] * Weights[weightBase + ic];
+	}
+
+	float pwSum = sum0 + sum1 + sum2 + sum3 + Bias[oc];
+
+#if HAS_SKIP
+	// Skip connection with channel padding
+	float skipVal = 0.0f;
+
+	// Skip buffer has spatial = block input spatial = OutHeight * Stride
+	int skipH = OutHeight * Stride;
+	int skipW = OutWidth * Stride;
+
+	if (oc < ChannelPad)
+	{
+		if (Stride == 2)
+		{
+			// Max-pool 2x2 from skip input at original spatial resolution
+			int sy = oy * 2;
+			int sx = ox * 2;
+			float maxVal = -1e30f;
+
+			for (int py = 0; py < 2; py++)
+			{
+				for (int px = 0; px < 2; px++)
+				{
+					int siy = sy + py;
+					int six = sx + px;
+					if (siy < skipH && six < skipW)
+					{
+						float sv = SkipBuffer[CHW_IDX(oc, siy, six, skipH, skipW)];
+						maxVal = max(maxVal, sv);
+					}
+				}
+			}
+			skipVal = maxVal;
+		}
+		else
+		{
+			skipVal = SkipBuffer[CHW_IDX(oc, oy, ox, skipH, skipW)];
+		}
+	}
+	// else: zero-padded (skipVal stays 0)
+
+	pwSum += skipVal;
+#endif
+
+	// Activation
+#if ACTIVATION_MODE == 1
+	pwSum = ActivateReLU(pwSum);
+#elif ACTIVATION_MODE == 2
+	pwSum = ActivatePReLU(pwSum, Alpha[oc]);
+#endif
+
+	OutputBuffer[CHW_IDX(oc, oy, ox, OutHeight, OutWidth)] = pwSum;
+}

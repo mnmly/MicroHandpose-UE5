@@ -1,0 +1,53 @@
+// MicroHandpose — 1x1 Conv + BN + optional ReLU6 (EfficientNet expand/project)
+// Weight layout: [OutChannels, InChannels]
+// Permutation: HAS_RELU6
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int Width;
+int Height;
+int InChannels;
+int OutChannels;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> Weights;    // [OutChannels, InChannels]
+StructuredBuffer<float> Bias;       // [OutChannels]
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void Conv1x1Bn(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int oc = DTid.z;
+
+	if (ox >= Width || oy >= Height || oc >= OutChannels)
+		return;
+
+	float sum = 0.0f;
+	int weightBase = oc * InChannels;
+
+	// vec4 accumulation for precision
+	float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+	int ic = 0;
+
+	for (; ic + 3 < InChannels; ic += 4)
+	{
+		sum0 += InputBuffer[CHW_IDX(ic,     oy, ox, Height, Width)] * Weights[weightBase + ic];
+		sum1 += InputBuffer[CHW_IDX(ic + 1, oy, ox, Height, Width)] * Weights[weightBase + ic + 1];
+		sum2 += InputBuffer[CHW_IDX(ic + 2, oy, ox, Height, Width)] * Weights[weightBase + ic + 2];
+		sum3 += InputBuffer[CHW_IDX(ic + 3, oy, ox, Height, Width)] * Weights[weightBase + ic + 3];
+	}
+
+	for (; ic < InChannels; ic++)
+	{
+		sum0 += InputBuffer[CHW_IDX(ic, oy, ox, Height, Width)] * Weights[weightBase + ic];
+	}
+
+	sum = sum0 + sum1 + sum2 + sum3 + Bias[oc];
+
+#if HAS_RELU6
+	sum = min(max(0.0f, sum), 6.0f);
+#endif
+
+	OutputBuffer[CHW_IDX(oc, oy, ox, Height, Width)] = sum;
+}

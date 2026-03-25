@@ -1,0 +1,29 @@
+# Unreal Engine generated
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.xcworkspace
+*.xcodeproj
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Local dev notes
+so-far.md
+compile_flags.txt

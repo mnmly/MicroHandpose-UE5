@@ -1,0 +1,41 @@
+// MicroHandpose — Bilinear 2x Upsample + Optional Add
+// Permutation: HAS_ADD
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InWidth;
+int InHeight;
+int Channels;
+int OutWidth;
+int OutHeight;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> AddBuffer;
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void Upsample2x(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int ch = DTid.z;
+
+	if (ox >= OutWidth || oy >= OutHeight || ch >= Channels)
+		return;
+
+	// half_pixel_centers = true (matches TFLite ResizeBilinear)
+	float scaleX = (float)InWidth / (float)OutWidth;
+	float scaleY = (float)InHeight / (float)OutHeight;
+
+	float srcX = ((float)ox + 0.5f) * scaleX - 0.5f;
+	float srcY = ((float)oy + 0.5f) * scaleY - 0.5f;
+
+	// Bilinear interpolation
+	float value = SampleBilinearCHW(InputBuffer, ch, srcY, srcX, InHeight, InWidth);
+
+#if HAS_ADD
+	int outIdx = CHW_IDX(ch, oy, ox, OutHeight, OutWidth);
+	value += AddBuffer[outIdx];
+#endif
+
+	OutputBuffer[CHW_IDX(ch, oy, ox, OutHeight, OutWidth)] = value;
+}

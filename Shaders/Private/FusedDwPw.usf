@@ -1,0 +1,90 @@
+// MicroHandpose — Fused Depthwise 5x5 + Pointwise 1x1 + Skip + ReLU
+// Uses group shared memory. One workgroup per spatial position.
+// All threads cooperatively process all channels.
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int SpatialWidth;
+int SpatialHeight;
+int Channels;
+int Stride;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> SkipBuffer;
+StructuredBuffer<float> DwWeights;    // [Channels, 25]
+StructuredBuffer<float> DwBias;       // [Channels]
+StructuredBuffer<float> PwWeights;    // [Channels, Channels] (same in/out for these layers)
+StructuredBuffer<float> PwBias;       // [Channels]
+RWStructuredBuffer<float> OutputBuffer;
+
+// Shared memory for depthwise output (one value per channel)
+groupshared float DwOutput[288]; // Max channels = 288
+
+[numthreads(256, 1, 1)]
+void FusedDwPw(uint3 GroupId : SV_GroupID, uint3 GTid : SV_GroupThreadID)
+{
+	int ox = GroupId.x;
+	int oy = GroupId.y;
+
+	if (ox >= SpatialWidth || oy >= SpatialHeight)
+		return;
+
+	int tid = GTid.x;
+
+	// Phase 1: Depthwise 5x5 convolution
+	// Each thread processes one or more channels via stride loop
+	for (int ch = tid; ch < Channels; ch += 256)
+	{
+		float sum = 0.0f;
+
+		// SAME padding
+		int padBefore = 2;
+
+		int weightBase = ch * 25;
+
+		for (int ky = 0; ky < 5; ky++)
+		{
+			int iy = oy * Stride + ky - padBefore;
+			if (iy < 0 || iy >= SpatialHeight) continue;
+
+			for (int kx = 0; kx < 5; kx++)
+			{
+				int ix = ox * Stride + kx - padBefore;
+				if (ix < 0 || ix >= SpatialWidth) continue;
+
+				float inputVal = InputBuffer[CHW_IDX(ch, iy, ix, SpatialHeight, SpatialWidth)];
+				float weightVal = DwWeights[weightBase + ky * 5 + kx];
+				sum += inputVal * weightVal;
+			}
+		}
+
+		sum += DwBias[ch];
+		DwOutput[ch] = sum;
+	}
+
+	// Synchronize — all threads must finish DW before PW reads
+	GroupMemoryBarrierWithGroupSync();
+
+	// Phase 2: Pointwise 1x1 + skip + ReLU
+	for (int oc = tid; oc < Channels; oc += 256)
+	{
+		float sum = 0.0f;
+
+		int weightBase = oc * Channels;
+
+		for (int ic = 0; ic < Channels; ic++)
+		{
+			sum += DwOutput[ic] * PwWeights[weightBase + ic];
+		}
+
+		sum += PwBias[oc];
+
+		// Skip connection (same spatial, same channels for these fused layers)
+		float skipVal = SkipBuffer[CHW_IDX(oc, oy, ox, SpatialHeight, SpatialWidth)];
+		sum += skipVal;
+
+		// ReLU
+		sum = ActivateReLU(sum);
+
+		OutputBuffer[CHW_IDX(oc, oy, ox, SpatialHeight, SpatialWidth)] = sum;
+	}
+}

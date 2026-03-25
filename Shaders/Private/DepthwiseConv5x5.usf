@@ -1,0 +1,56 @@
+// MicroHandpose — Depthwise 5x5 Convolution (no activation)
+// Weight layout: [channels, 25] (transposed from TFLite [1,5,5,ch])
+#include "/Plugin/MicroHandpose/Private/Common.ush"
+
+int InWidth;
+int InHeight;
+int Channels;
+int OutWidth;
+int OutHeight;
+int Stride;
+
+StructuredBuffer<float> InputBuffer;
+StructuredBuffer<float> Weights;   // [Channels, 25]
+StructuredBuffer<float> Bias;      // [Channels]
+RWStructuredBuffer<float> OutputBuffer;
+
+[numthreads(8, 8, 1)]
+void DepthwiseConv5x5(uint3 DTid : SV_DispatchThreadID)
+{
+	int ox = DTid.x;
+	int oy = DTid.y;
+	int ch = DTid.z;
+
+	if (ox >= OutWidth || oy >= OutHeight || ch >= Channels)
+		return;
+
+	float sum = 0.0f;
+
+	// SAME padding
+	int outSize = (Stride == 2) ? ((InWidth + 1) / 2) : InWidth;
+	int padTotal = max(0, (outSize - 1) * Stride + 5 - ((Stride == 2) ? InWidth : InWidth));
+	int padBefore = padTotal / 2;
+
+	int weightBase = ch * 25;
+
+	for (int ky = 0; ky < 5; ky++)
+	{
+		int iy = oy * Stride + ky - padBefore;
+		if (iy < 0 || iy >= InHeight) continue;
+
+		for (int kx = 0; kx < 5; kx++)
+		{
+			int ix = ox * Stride + kx - padBefore;
+			if (ix < 0 || ix >= InWidth) continue;
+
+			float inputVal = InputBuffer[CHW_IDX(ch, iy, ix, InHeight, InWidth)];
+			float weightVal = Weights[weightBase + ky * 5 + kx];
+			sum += inputVal * weightVal;
+		}
+	}
+
+	sum += Bias[ch];
+
+	// No activation — raw output
+	OutputBuffer[CHW_IDX(ch, oy, ox, OutHeight, OutWidth)] = sum;
+}
