@@ -10,6 +10,7 @@ public class MicroHandpose : ModuleRules
 		PublicIncludePaths.AddRange(
 			new string[] {
 				Path.Combine(GetModuleDirectory("Renderer"), "Private"),
+				GetModuleDirectory("MicroHandpose"),
 			}
 		);
 
