@@ -3,6 +3,7 @@
 #include "/Plugin/MicroHandpose/Private/Common.ush"
 
 int DstSize;       // Output is DstSize x DstSize (224 for landmark model)
+int SrgbInputFlag; // 1 if InputTexture is sRGB-flagged, 0 otherwise
 
 // 4x4 affine matrix (only 2x3 used): maps normalized dst coords [0,1] → source UV [0,1]
 float4x4 AffineMatrix;
@@ -30,11 +31,12 @@ void AffineCrop(uint3 DTid : SV_DispatchThreadID)
 
 	// Bilinear sample from texture (hardware interpolation via sampler)
 	float4 color = InputTexture.SampleLevel(InputSampler, float2(u, v), 0);
+	float3 rgb = (SrgbInputFlag != 0) ? LinearToSrgb(color.rgb) : color.rgb;
 
 	// Write CHW layout: [3, DstSize, DstSize], RGB order
 	// Note: texture may be BGRA format, but SampleLevel always returns RGBA in HLSL
 	int pixelIdx = dy * DstSize + dx;
-	OutputBuffer[0 * DstSize * DstSize + pixelIdx] = color.r;
-	OutputBuffer[1 * DstSize * DstSize + pixelIdx] = color.g;
-	OutputBuffer[2 * DstSize * DstSize + pixelIdx] = color.b;
+	OutputBuffer[0 * DstSize * DstSize + pixelIdx] = rgb.r;
+	OutputBuffer[1 * DstSize * DstSize + pixelIdx] = rgb.g;
+	OutputBuffer[2 * DstSize * DstSize + pixelIdx] = rgb.b;
 }

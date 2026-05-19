@@ -26,6 +26,12 @@ private:
 	float ScoreThreshold = 0.5f;
 	float PalmScoreThreshold = 0.5f;
 
+	/** Per-landmark exponential moving average factor (1 = raw, lower = smoother).  */
+	float SmoothingAlpha = 0.4f;
+
+	/** Previous broadcast frame (keyed by handedness) so EMA survives across ticks. */
+	TArray<FHandposeResult> SmoothedResults;
+
 	FDelegateHandle BeginFrameHandle;
 	FDelegateHandle WorldCleanupHandle;
 
@@ -72,6 +78,19 @@ public:
 	/** Set minimum confidence threshold for palm detection (0-1). */
 	UFUNCTION(BlueprintCallable, Category = "Handpose")
 	void SetPalmScoreThreshold(float Threshold);
+
+	/**
+	 * EMA smoothing factor for landmark positions, in [0,1].
+	 *  1.0  = no smoothing (raw output).
+	 *  ~0.4 = moderate smoothing (default).
+	 *  0.0  = freeze (don't use).
+	 * Lower values feel laggier but smoother.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Handpose")
+	void SetSmoothingAlpha(float Alpha) { SmoothingAlpha = FMath::Clamp(Alpha, 0.f, 1.f); }
+
+	UFUNCTION(BlueprintPure, Category = "Handpose")
+	float GetSmoothingAlpha() const { return SmoothingAlpha; }
 
 	/** Whether hand tracking is currently active. */
 	UFUNCTION(BlueprintCallable, Category = "Handpose")

@@ -21,11 +21,15 @@ FHandposeResult FLandmarkPostProcess::DenormalizeLandmarks(
 	float CosR = FMath::Cos(ROI.Rotation);
 	float SinR = FMath::Sin(ROI.Rotation);
 
+	// Landmark model outputs in pixel space of its 224×224 input crop, not [0,1].
+	// Keep in sync with CropSize in HandposeDetector.cpp.
+	constexpr float LandmarkCropSize = 224.f;
+
 	for (int32 i = 0; i < NUM_HAND_LANDMARKS; i++)
 	{
-		float LX = RawLandmarks[i * 3];     // [0,1] in crop space
-		float LY = RawLandmarks[i * 3 + 1]; // [0,1] in crop space
-		float LZ = RawLandmarks[i * 3 + 2]; // Relative depth
+		float LX = RawLandmarks[i * 3]     / LandmarkCropSize; // -> [0,1] in crop space
+		float LY = RawLandmarks[i * 3 + 1] / LandmarkCropSize; // -> [0,1] in crop space
+		float LZ = RawLandmarks[i * 3 + 2]; // Relative depth (untouched)
 
 		// Transform from crop [0,1] to pixel offset from center
 		float DX = (LX - 0.5f) * ROI.SizePx;

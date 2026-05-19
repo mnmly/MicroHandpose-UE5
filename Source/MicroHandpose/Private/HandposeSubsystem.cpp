@@ -72,6 +72,71 @@ void UHandposeSubsystem::OnBeginFrame()
 
 	if (LatestResults.Num() > 0)
 	{
+		// EMA smoothing — hide jitter between detector cycles. Match incoming
+		// hands to prior-frame hands by handedness so a left/right swap doesn't
+		// blend two different hands together. New hands enter at their raw
+		// position (no warm-up jump).
+		if (SmoothingAlpha < 1.0f)
+		{
+			const float A = SmoothingAlpha;
+			const float OneMinusA = 1.0f - A;
+			TArray<FHandposeResult> Next;
+			Next.Reserve(LatestResults.Num());
+
+			for (const FHandposeResult& In : LatestResults)
+			{
+				const FHandposeResult* Prev = SmoothedResults.FindByPredicate(
+					[&In](const FHandposeResult& R) { return R.Handedness == In.Handedness; });
+
+				FHandposeResult Out = In;
+				if (Prev && Prev->Landmarks.Num() == Out.Landmarks.Num())
+				{
+					for (int32 i = 0; i < Out.Landmarks.Num(); ++i)
+					{
+						Out.Landmarks[i].Position = A * In.Landmarks[i].Position
+						                          + OneMinusA * Prev->Landmarks[i].Position;
+					}
+				}
+				Next.Add(MoveTemp(Out));
+			}
+
+			SmoothedResults = Next;
+			LatestResults = SmoothedResults;
+		}
+		else
+		{
+			SmoothedResults = LatestResults;
+		}
+
+		// Instrumentation: log update rate + how often the wrist position is
+		// actually changing (i.e. whether downstream is getting new data or
+		// the same cached frame repeatedly).
+		{
+			static double LastSummaryTime = FPlatformTime::Seconds();
+			static int32 BroadcastsThisSecond = 0;
+			static int32 ChangedThisSecond = 0;
+			static FVector LastWrist(0.f);
+
+			BroadcastsThisSecond++;
+			const FVector NewWrist = LatestResults[0].Landmarks.Num() > 0 ? LatestResults[0].Landmarks[0].Position : FVector::ZeroVector;
+			if (!NewWrist.Equals(LastWrist, KINDA_SMALL_NUMBER))
+			{
+				ChangedThisSecond++;
+				LastWrist = NewWrist;
+			}
+
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSummaryTime >= 1.0)
+			{
+				UE_LOG(LogMicroHandpose, Log,
+					TEXT("[Subsystem] %d broadcasts/s, %d wrist-changed/s, lastWrist=(%.3f,%.3f,%.3f)"),
+					BroadcastsThisSecond, ChangedThisSecond, LastWrist.X, LastWrist.Y, LastWrist.Z);
+				BroadcastsThisSecond = 0;
+				ChangedThisSecond = 0;
+				LastSummaryTime = Now;
+			}
+		}
+
 		OnHandposeUpdated.Broadcast(LatestResults);
 	}
 }
@@ -135,6 +200,7 @@ void UHandposeSubsystem::StopTracking()
 
 	FScopeLock Lock(&ResultGuard);
 	LatestResults.Empty();
+	SmoothedResults.Empty();
 
 	UE_LOG(LogMicroHandpose, Log, TEXT("[MicroHandpose] Tracking stopped"));
 }

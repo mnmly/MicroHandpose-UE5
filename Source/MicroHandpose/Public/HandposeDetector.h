@@ -52,8 +52,9 @@ struct FMBConvBlock
 enum class EPipelinePhase : uint8
 {
 	Idle,
-	PalmDispatched,       // Palm detection dispatched, waiting for GPU readback
-	LandmarkDispatched,   // Landmark inference dispatched, waiting for GPU readback
+	PalmDispatched,           // Palm detection dispatched, waiting for GPU readback
+	LandmarkDispatched,       // Landmark inference dispatched (post palm), waiting for readback
+	LandmarkOnlyDispatched,   // Tracking-mode bypass: landmark dispatched from last-frame ROI
 };
 
 /**
@@ -152,9 +153,20 @@ private:
 	// Cached results from last completed inference
 	TArray<FHandposeResult> CachedResults;
 
+	// Last accepted results — drives tracking-mode bypass on the next frame.
+	TArray<FHandposeResult> LastValidResults;
+
+	// Skip palm detection while a previous frame produced a confident hand.
+	bool bUseTrackingBypass = true;
+
 	// Source image dimensions (from last input texture)
 	int32 SrcWidth = 0;
 	int32 SrcHeight = 0;
+
+	// True if the input texture was created with TexCreate_SRGB (hardware sampler
+	// decodes to linear). When true, shaders re-encode to sRGB so model input
+	// matches the JS reference (raw uint8/255, no gamma conversion).
+	bool bInputIsSrgb = false;
 
 	// Letterbox padding (needed for removing padding from detections)
 	float LetterboxPadX = 0.0f;

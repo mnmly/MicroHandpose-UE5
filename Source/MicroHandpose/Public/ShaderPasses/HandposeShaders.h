@@ -21,6 +21,7 @@ class FLetterboxResizeCS : public FGlobalShader
 		SHADER_PARAMETER(float, ScaleY)
 		SHADER_PARAMETER(float, OffsetX)
 		SHADER_PARAMETER(float, OffsetY)
+		SHADER_PARAMETER(int32, SrgbInputFlag)
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, InputTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWStructuredBuffer<float>, OutputBuffer)
@@ -248,6 +249,7 @@ class FAffineCropCS : public FGlobalShader
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
 		SHADER_PARAMETER(int32, DstSize)
+		SHADER_PARAMETER(int32, SrgbInputFlag)
 		SHADER_PARAMETER(FMatrix44f, AffineMatrix)
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D<float4>, InputTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, InputSampler)

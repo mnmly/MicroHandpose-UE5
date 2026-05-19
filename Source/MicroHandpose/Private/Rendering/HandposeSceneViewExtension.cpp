@@ -57,8 +57,10 @@ void FHandposeSceneViewExtension::PostRenderViewFamily_RenderThread(
 
 	if (!bLoggedFirstRun)
 	{
-		UE_LOG(LogMicroHandpose, Log, TEXT("SVE: first pipeline run — input texture %dx%d, format=%d"),
-			TexSize.X, TexSize.Y, (int32)ResolvedTexture->GetFormat());
+		const ETextureCreateFlags Flags = ResolvedTexture->GetDesc().Flags;
+		const bool bSrgb = EnumHasAnyFlags(Flags, TexCreate_SRGB);
+		UE_LOG(LogMicroHandpose, Log, TEXT("SVE: first pipeline run — input texture %dx%d, format=%d, sRGB=%s"),
+			TexSize.X, TexSize.Y, (int32)ResolvedTexture->GetFormat(), bSrgb ? TEXT("YES") : TEXT("no"));
 		bLoggedFirstRun = true;
 	}
 

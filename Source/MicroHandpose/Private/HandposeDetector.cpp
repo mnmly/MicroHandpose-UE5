@@ -384,6 +384,11 @@ void FHandposeDetector::DispatchPalmDetection(FRDGBuilder& GraphBuilder, FRDGTex
 	SrcWidth = TexDesc.Extent.X;
 	SrcHeight = TexDesc.Extent.Y;
 
+	// sRGB-flagged textures (typical for MediaTexture) sample through hardware
+	// gamma decode → linear. The model was trained on sRGB-encoded display
+	// values, so we re-encode in-shader to match the JS reference.
+	bInputIsSrgb = EnumHasAnyFlags(TexDesc.Flags, TexCreate_SRGB);
+
 	// ---- 1. Letterbox resize → 192×192 CHW ----
 	constexpr int32 PalmSize = 192;
 	float Scale = FMath::Max(SrcWidth, SrcHeight) / (float)PalmSize;
@@ -404,6 +409,7 @@ void FHandposeDetector::DispatchPalmDetection(FRDGBuilder& GraphBuilder, FRDGTex
 		P->ScaleY = Scale;
 		P->OffsetX = LetterboxPadX;
 		P->OffsetY = LetterboxPadY;
+		P->SrgbInputFlag = bInputIsSrgb ? 1 : 0;
 		P->InputTexture = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(InputTexture));
 		P->InputSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 		P->OutputBuffer = GraphBuilder.CreateUAV(PalmInput);
@@ -704,6 +710,7 @@ void FHandposeDetector::DispatchLandmarkInference(FRDGBuilder& GraphBuilder, FRD
 	{
 		auto* P = GraphBuilder.AllocParameters<FAffineCropCS::FParameters>();
 		P->DstSize = CropSize;
+		P->SrgbInputFlag = bInputIsSrgb ? 1 : 0;
 		P->AffineMatrix = AffineMat;
 		P->InputTexture = GraphBuilder.CreateSRV(FRDGTextureSRVDesc(InputTexture));
 		P->InputSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
@@ -965,10 +972,82 @@ TArray<FHandposeResult> FHandposeDetector::RunPipeline(
 		return {};
 	}
 
+	// --- Pipeline instrumentation ----------------------------------------
+	// Track how long we sit in each phase. Logs once per second a summary so
+	// you can see whether GPU readbacks are taking ages, or whether something
+	// further upstream stopped delivering frames.
+	{
+		static EPipelinePhase LastPhase = EPipelinePhase::Idle;
+		static int32 FramesInPhase = 0;
+		static int32 FramesSinceLastResult = 0;
+		static int32 CompletedCyclesThisSecond = 0;
+		static double LastSummaryTime = FPlatformTime::Seconds();
+
+		if (Phase != LastPhase)
+		{
+			UE_LOG(LogMicroHandpose, Log,
+				TEXT("[Pipeline] Phase %d -> %d after %d frame(s)"),
+				(int32)LastPhase, (int32)Phase, FramesInPhase);
+			LastPhase = Phase;
+			FramesInPhase = 0;
+		}
+		FramesInPhase++;
+		FramesSinceLastResult++;
+
+		const double Now = FPlatformTime::Seconds();
+		if (Now - LastSummaryTime >= 1.0)
+		{
+			UE_LOG(LogMicroHandpose, Log,
+				TEXT("[Pipeline] %.1f Hz results, phase=%d, framesInPhase=%d, lastResultAge=%d frames, cached=%d, lastValid=%d"),
+				CompletedCyclesThisSecond / (Now - LastSummaryTime),
+				(int32)Phase, FramesInPhase, FramesSinceLastResult,
+				CachedResults.Num(), LastValidResults.Num());
+			CompletedCyclesThisSecond = 0;
+			LastSummaryTime = Now;
+		}
+
+		// Note: completed cycle counter is incremented at the end of each
+		// "results just produced" code path below (LandmarkDispatched +
+		// LandmarkOnlyDispatched returns). We can't easily do that without
+		// goto, so we approximate by counting when Phase transitions to Idle
+		// with CachedResults non-empty. Done in the phase-change branch above
+		// — but the transition already happened, so detect it here:
+		if (Phase == EPipelinePhase::Idle && FramesInPhase <= 1 && CachedResults.Num() > 0)
+		{
+			CompletedCyclesThisSecond++;
+			FramesSinceLastResult = 0;
+		}
+	}
+
 	switch (Phase)
 	{
 	case EPipelinePhase::Idle:
 	{
+		// Tracking-mode bypass: if the last frame produced a confident hand,
+		// compute next ROI from those landmarks and skip palm detection.
+		if (bUseTrackingBypass && LastValidResults.Num() > 0 && SrcWidth > 0 && SrcHeight > 0)
+		{
+			LandmarkROIs.Empty();
+			const int32 NumHands = FMath::Min(LastValidResults.Num(), MaxHands);
+			for (int32 h = 0; h < NumHands; h++)
+			{
+				const FHandposeResult& Prev = LastValidResults[h];
+				if (Prev.Landmarks.Num() < NUM_HAND_LANDMARKS) continue;
+				FLandmarkPostProcess::FPixelROI PixelROI =
+					FLandmarkPostProcess::LandmarksToROI(Prev.Landmarks, SrcWidth, SrcHeight);
+				LandmarkROIs.Add(PixelROI);
+				DispatchLandmarkInference(GraphBuilder, InputTexture, PixelROI, LandmarkROIs.Num() - 1);
+			}
+
+			if (LandmarkROIs.Num() > 0)
+			{
+				UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: tracking bypass — landmark-only for %d hand(s)"),
+					LandmarkROIs.Num());
+				Phase = EPipelinePhase::LandmarkOnlyDispatched;
+				break;
+			}
+		}
+
 		UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: Idle -> dispatching palm detection"));
 		DispatchPalmDetection(GraphBuilder, InputTexture);
 		Phase = EPipelinePhase::PalmDispatched;
@@ -1004,12 +1083,29 @@ TArray<FHandposeResult> FHandposeDetector::RunPipeline(
 		ReorganizeSSDOutput(Cls16, Reg16, Cls8, Reg8, Scores, Regressors);
 
 		TArray<FPalmDetection> Detections = PalmPostProcess->DecodeDetections(Scores, Regressors, PalmScoreThreshold);
-		UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: palm readback complete — %d raw detections (threshold=%.2f)"),
-			Detections.Num(), PalmScoreThreshold);
 
 		FPalmDetectionPostProcess::RemoveLetterboxPadding(Detections, LetterboxPadX, LetterboxPadY);
 		TArray<FPalmDetection> NmsDetections = FPalmDetectionPostProcess::WeightedNMS(Detections, 0.3f);
-		UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: %d detections after NMS"), NmsDetections.Num());
+
+		// Promote to Log so the rate-limited summary surfaces detection counts.
+		{
+			static int32 ZeroFrameCount = 0;
+			static int32 NonZeroFrameCount = 0;
+			static double LastSummary = FPlatformTime::Seconds();
+			if (NmsDetections.Num() == 0) ZeroFrameCount++;
+			else NonZeroFrameCount++;
+
+			const double Now = FPlatformTime::Seconds();
+			if (Now - LastSummary >= 1.0)
+			{
+				UE_LOG(LogMicroHandpose, Log,
+					TEXT("[Palm] %d frames with detections, %d frames with 0 detections in last %.1fs (threshold=%.2f, src=%dx%d)"),
+					NonZeroFrameCount, ZeroFrameCount, Now - LastSummary, PalmScoreThreshold, SrcWidth, SrcHeight);
+				ZeroFrameCount = 0;
+				NonZeroFrameCount = 0;
+				LastSummary = Now;
+			}
+		}
 
 		// Convert to ROIs and dispatch landmark inference
 		PendingROIs.Empty();
@@ -1048,6 +1144,11 @@ TArray<FHandposeResult> FHandposeDetector::RunPipeline(
 		CachedResults.Empty();
 		int32 NumHands = LandmarkROIs.Num();
 
+		// Mirror JS: post-palm landmark accept uses min(threshold, 0.1) so a hand
+		// can latch on at moderate landmark confidence and feed the next-frame
+		// tracking path. See handpose.ts runLandmarkForROI(isTracking=true).
+		const float AcceptThreshold = FMath::Min(ScoreThreshold, 0.1f);
+
 		for (int32 h = 0; h < NumHands; h++)
 		{
 			int32 BaseIdx = h * 3;
@@ -1067,23 +1168,84 @@ TArray<FHandposeResult> FHandposeDetector::RunPipeline(
 			LandmarkReadbacks[BaseIdx + 1]->Unlock();
 			LandmarkReadbacks[BaseIdx + 2]->Unlock();
 
-			if (HandFlag >= ScoreThreshold)
+			if (HandFlag >= AcceptThreshold)
 			{
 				FHandposeResult Result = FLandmarkPostProcess::DenormalizeLandmarks(
 					RawLandmarks, HandFlag, Handedness, LandmarkROIs[h], SrcWidth, SrcHeight);
 				CachedResults.Add(Result);
-				UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: hand %d accepted (flag=%.3f, handedness=%.3f -> %s)"),
-					h, HandFlag, Handedness, Handedness > 0.5f ? TEXT("Right") : TEXT("Left"));
+				UE_LOG(LogMicroHandpose, Log, TEXT("[Landmark] hand %d ACCEPT flag=%.3f hand=%s thr=%.2f"),
+					h, HandFlag, Handedness > 0.5f ? TEXT("R") : TEXT("L"), AcceptThreshold);
 			}
 			else
 			{
-				UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: hand %d rejected (flag=%.3f < threshold %.2f)"),
-					h, HandFlag, ScoreThreshold);
+				UE_LOG(LogMicroHandpose, Log, TEXT("[Landmark] hand %d REJECT flag=%.3f < thr=%.2f"),
+					h, HandFlag, AcceptThreshold);
 			}
 		}
 
+		// Update tracking-bypass cache: only carry forward hands that landed above threshold.
+		LastValidResults = CachedResults;
+
 		UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: landmark readback complete — %d hand(s) returned, back to Idle"),
 			CachedResults.Num());
+		Phase = EPipelinePhase::Idle;
+		break;
+	}
+
+	case EPipelinePhase::LandmarkOnlyDispatched:
+	{
+		if (LandmarkReadbacks.Num() == 0 || !LandmarkReadbacks[0]->IsReady())
+		{
+			UE_LOG(LogMicroHandpose, VeryVerbose, TEXT("Pipeline: LandmarkOnlyDispatched, readback not ready yet"));
+			break;
+		}
+
+		CachedResults.Empty();
+		const int32 NumHands = LandmarkROIs.Num();
+
+		// Tracking-mode threshold: same lenient gate as the post-palm path.
+		const float AcceptThreshold = FMath::Min(ScoreThreshold, 0.1f);
+
+		for (int32 h = 0; h < NumHands; h++)
+		{
+			const int32 BaseIdx = h * 3;
+
+			const float* LmData = (const float*)LandmarkReadbacks[BaseIdx + 0]->Lock(63 * sizeof(float));
+			const float* HfData = (const float*)LandmarkReadbacks[BaseIdx + 1]->Lock(1 * sizeof(float));
+			const float* HdData = (const float*)LandmarkReadbacks[BaseIdx + 2]->Lock(1 * sizeof(float));
+
+			TArray<float> RawLandmarks;
+			RawLandmarks.SetNumUninitialized(63);
+			FMemory::Memcpy(RawLandmarks.GetData(), LmData, 63 * sizeof(float));
+
+			const float HandFlag = HfData[0];
+			const float Handedness = HdData[0];
+
+			LandmarkReadbacks[BaseIdx + 0]->Unlock();
+			LandmarkReadbacks[BaseIdx + 1]->Unlock();
+			LandmarkReadbacks[BaseIdx + 2]->Unlock();
+
+			if (HandFlag >= AcceptThreshold)
+			{
+				FHandposeResult Result = FLandmarkPostProcess::DenormalizeLandmarks(
+					RawLandmarks, HandFlag, Handedness, LandmarkROIs[h], SrcWidth, SrcHeight);
+				CachedResults.Add(Result);
+			}
+		}
+
+		// If any hand fell below threshold we lost lock — drop the cache so the
+		// next frame falls back to palm detection automatically.
+		if (CachedResults.Num() < NumHands)
+		{
+			LastValidResults.Empty();
+		}
+		else
+		{
+			LastValidResults = CachedResults;
+		}
+
+		UE_LOG(LogMicroHandpose, Verbose, TEXT("Pipeline: landmark-only readback complete — %d/%d hand(s) kept"),
+			CachedResults.Num(), NumHands);
 		Phase = EPipelinePhase::Idle;
 		break;
 	}

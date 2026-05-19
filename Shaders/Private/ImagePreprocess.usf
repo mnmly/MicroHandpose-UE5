@@ -8,6 +8,7 @@ float ScaleX;      // src_width / letterbox_width
 float ScaleY;      // src_height / letterbox_height
 float OffsetX;     // horizontal offset for letterbox
 float OffsetY;     // vertical offset for letterbox
+int   SrgbInputFlag; // 1 if InputTexture is sRGB-flagged (sampler returns linear), 0 otherwise
 
 Texture2D<float4> InputTexture;
 SamplerState InputSampler;
@@ -38,9 +39,10 @@ void LetterboxResize(uint3 DTid : SV_DispatchThreadID)
 		float u = (src_x + 0.5f) / (float)SrcWidth;
 		float v = (src_y + 0.5f) / (float)SrcHeight;
 		float4 color = InputTexture.SampleLevel(InputSampler, float2(u, v), 0);
-		r = color.r;
-		g = color.g;
-		b = color.b;
+		float3 rgb = (SrgbInputFlag != 0) ? LinearToSrgb(color.rgb) : color.rgb;
+		r = rgb.r;
+		g = rgb.g;
+		b = rgb.b;
 	}
 
 	// Write CHW layout: [3, DstSize, DstSize]
